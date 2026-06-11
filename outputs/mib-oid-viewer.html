@@ -68,7 +68,7 @@
 
     .controls {
       display: grid;
-      grid-template-columns: minmax(260px, 1fr) minmax(220px, 360px);
+      grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) minmax(220px, 360px);
       gap: 14px;
       padding: 18px;
       margin-bottom: 18px;
@@ -192,6 +192,12 @@
       min-width: 300px;
     }
 
+    .type,
+    .source {
+      color: #475467;
+      white-space: nowrap;
+    }
+
     .empty {
       padding: 34px 18px;
       color: var(--muted);
@@ -232,36 +238,42 @@
     <header>
       <div>
         <h1>MIB OID 解析工具</h1>
-        <p class="subtitle">選取 MIB 檔案後，自動解析名稱、定義與完整 numeric OID。</p>
+        <p class="subtitle">選取單一 MIB 檔案或整個 MIB 資料夾後，自動解析名稱、類型、定義與完整 numeric OID。</p>
       </div>
     </header>
 
     <section class="panel" aria-label="MIB parser">
       <div class="controls">
         <div>
-          <label for="mibFile">MIB 檔案</label>
+          <label for="mibFile">單一 MIB 檔案</label>
           <input id="mibFile" type="file" accept=".mib,.txt,text/plain">
         </div>
         <div>
+          <label for="mibFolder">整個 MIB 資料夾</label>
+          <input id="mibFolder" type="file" webkitdirectory directory multiple>
+        </div>
+        <div>
           <label for="searchInput">依名稱搜尋</label>
-          <input id="searchInput" type="search" placeholder="例如 x440g2、summitX460" disabled>
+          <input id="searchInput" type="search" placeholder="例如 x440g2、zyxelAaa、summitX460" disabled>
         </div>
       </div>
 
       <div class="summary" aria-live="polite">
         <span class="chip" id="totalCount">尚未載入</span>
-        <span id="fileInfo">請先選擇 .mib 或 .txt 檔案。</span>
+        <span id="fileInfo">請先選擇 .mib / .txt 檔案，或選擇整個 MIB 資料夾。</span>
       </div>
 
-      <p class="message" id="message">解析結果會顯示在下方表格。瀏覽器安全限制下，網頁不會自動讀取本機路徑，需由你手動選檔。</p>
+      <p class="message" id="message">資料夾模式會讀取其中所有 .mib、.MIB、.txt 檔案，並跨檔案解析 IMPORTS 依賴所需的 OID 符號。</p>
 
       <div class="table-wrap hidden" id="tableWrap">
         <table>
           <thead>
             <tr>
               <th>名稱</th>
+              <th>類型</th>
               <th>定義</th>
               <th>完整 OID</th>
+              <th>來源檔案</th>
             </tr>
           </thead>
           <tbody id="resultBody"></tbody>
@@ -285,10 +297,11 @@
     const state = {
       entries: [],
       filtered: [],
-      fileName: ""
+      sourceLabel: ""
     };
 
     const fileInput = document.getElementById("mibFile");
+    const folderInput = document.getElementById("mibFolder");
     const searchInput = document.getElementById("searchInput");
     const totalCount = document.getElementById("totalCount");
     const fileInfo = document.getElementById("fileInfo");
@@ -298,6 +311,7 @@
     const emptyState = document.getElementById("emptyState");
 
     fileInput.addEventListener("change", handleFileSelect);
+    folderInput.addEventListener("change", handleFolderSelect);
     searchInput.addEventListener("input", applySearch);
 
     async function handleFileSelect(event) {
@@ -308,40 +322,94 @@
       }
 
       try {
-        const text = await file.text();
-        const entries = parseMib(text);
-
-        state.entries = entries;
-        state.filtered = entries;
-        state.fileName = file.name;
-        searchInput.value = "";
-        searchInput.disabled = entries.length === 0;
-
-        fileInfo.textContent = `已載入：${file.name}`;
-        totalCount.textContent = `共 ${entries.length} 筆`;
-
-        if (entries.length === 0) {
-          showMessage("沒有解析到 OBJECT IDENTIFIER 定義。請確認檔案內容是否為 MIB 格式。", true);
-          render();
-          return;
-        }
-
-        showMessage(`解析完成。可用名稱搜尋篩選 ${entries.length} 筆資料。`, false);
-        render();
+        folderInput.value = "";
+        const mibFiles = await readMibFiles([file]);
+        loadEntries(mibFiles, `已載入：${file.name}`);
       } catch (error) {
         resetView(`檔案讀取或解析失敗：${error.message || error}`);
       }
     }
 
+    async function handleFolderSelect(event) {
+      const files = Array.from(event.target.files || []);
+      if (files.length === 0) {
+        resetView("請先選擇 MIB 資料夾。");
+        return;
+      }
+
+      try {
+        fileInput.value = "";
+        const mibFiles = await readMibFiles(files);
+        const folderName = getFolderName(mibFiles, files);
+        loadEntries(mibFiles, `已載入資料夾：${folderName}，MIB 檔 ${mibFiles.length} 個`);
+      } catch (error) {
+        resetView(`資料夾讀取或解析失敗：${error.message || error}`);
+      }
+    }
+
+    function loadEntries(mibFiles, loadedText) {
+      const entries = parseMibFiles(mibFiles);
+
+      state.entries = entries;
+      state.filtered = entries;
+      state.sourceLabel = loadedText;
+      searchInput.value = "";
+      searchInput.disabled = entries.length === 0;
+
+      fileInfo.textContent = loadedText;
+      totalCount.textContent = `共 ${entries.length} 筆`;
+
+      if (mibFiles.length === 0) {
+        showMessage("沒有找到 .mib、.MIB 或 .txt 檔案。", true);
+        render();
+        return;
+      }
+
+      if (entries.length === 0) {
+        showMessage("沒有解析到可展開完整 OID 的 MIB 定義。請確認已包含相依的 base/SMI MIB 檔。", true);
+        render();
+        return;
+      }
+
+      showMessage(`解析完成。已跨 ${mibFiles.length} 個檔案建立符號表，可用名稱搜尋篩選 ${entries.length} 筆資料。`, false);
+      render();
+    }
+
+    async function readMibFiles(files) {
+      const selected = files
+        .filter((file) => /\.(mib|txt)$/i.test(file.name))
+        .sort((a, b) => getDisplayPath(a).localeCompare(getDisplayPath(b)));
+
+      const mibFiles = [];
+      for (const file of selected) {
+        mibFiles.push({
+          name: file.name,
+          path: getDisplayPath(file),
+          text: await file.text()
+        });
+      }
+
+      return mibFiles;
+    }
+
+    function getDisplayPath(file) {
+      return file.webkitRelativePath || file.name;
+    }
+
+    function getFolderName(mibFiles, originalFiles) {
+      const firstPath = (mibFiles[0] && mibFiles[0].path) || (originalFiles[0] && getDisplayPath(originalFiles[0])) || "選取的資料夾";
+      return firstPath.includes("/") ? firstPath.split("/")[0] : "選取的資料夾";
+    }
+
     function resetView(text) {
       state.entries = [];
       state.filtered = [];
-      state.fileName = "";
+      state.sourceLabel = "";
       searchInput.value = "";
       searchInput.disabled = true;
       totalCount.textContent = "尚未載入";
       fileInfo.textContent = text;
-      showMessage("解析結果會顯示在下方表格。瀏覽器安全限制下，網頁不會自動讀取本機路徑，需由你手動選檔。", false);
+      showMessage("資料夾模式會讀取其中所有 .mib、.MIB、.txt 檔案，並跨檔案解析 IMPORTS 依賴所需的 OID 符號。", false);
       render();
     }
 
@@ -364,47 +432,64 @@
       render();
     }
 
-    function parseMib(text) {
-      const lines = text.replace(/\r\n?/g, "\n").split("\n");
+    function parseMibFiles(mibFiles) {
       const symbols = new Map(Object.entries(BUILTIN_OIDS));
+      const declarations = [];
       const definitions = [];
 
-      for (let index = 0; index < lines.length; index += 1) {
-        const assignment = lines[index].match(/::=\s*\{\s*([A-Za-z][\w-]*)\s+(\d+)\s*\}/);
-        if (!assignment) {
-          continue;
-        }
+      for (const file of mibFiles) {
+        const lines = file.text.replace(/\r\n?/g, "\n").split("\n");
+        for (let index = 0; index < lines.length; index += 1) {
+          const assignment = lines[index].match(/::=\s*\{\s*([A-Za-z][\w-]*)\s+(\d+)\s*\}/);
+          if (!assignment) {
+            continue;
+          }
 
-        const declaration = readDeclaration(lines, index);
-        if (!declaration) {
-          continue;
-        }
+          const declaration = readDeclaration(lines, index);
+          if (!declaration) {
+            continue;
+          }
 
-        const parent = assignment[1];
-        const id = Number(assignment[2]);
-        const parentOid = symbols.get(parent);
-        if (!parentOid) {
-          continue;
-        }
-
-        const oidParts = parentOid.concat(id);
-        symbols.set(declaration.name, oidParts);
-
-        if (declaration.type.toUpperCase().includes("OBJECT IDENTIFIER")) {
-          definitions.push({
+          declarations.push({
             name: declaration.name,
-            definition: readFollowingComments(lines, index + 1),
-            oid: `.${oidParts.join(".")}`
+            type: normalizeType(declaration.type),
+            parent: assignment[1],
+            id: Number(assignment[2]),
+            definition: readDescription(lines, index) || readFollowingComments(lines, index + 1),
+            source: file.path
           });
         }
       }
 
-      return definitions;
+      const unresolved = declarations.slice();
+      let didResolve = true;
+      while (didResolve && unresolved.length > 0) {
+        didResolve = false;
+
+        for (let index = unresolved.length - 1; index >= 0; index -= 1) {
+          const item = unresolved[index];
+          const parentOid = symbols.get(item.parent);
+          if (!parentOid) {
+            continue;
+          }
+
+          const oidParts = parentOid.concat(item.id);
+          symbols.set(item.name, oidParts);
+          item.oid = `.${oidParts.join(".")}`;
+          definitions.push(item);
+          unresolved.splice(index, 1);
+          didResolve = true;
+        }
+      }
+
+      return definitions
+        .filter((entry) => shouldDisplayType(entry.type))
+        .sort((a, b) => a.oid.localeCompare(b.oid, undefined, { numeric: true }));
     }
 
     function readDeclaration(lines, assignmentIndex) {
       const sameLine = lines[assignmentIndex].slice(0, lines[assignmentIndex].indexOf("::=")).trim();
-      const sameLineMatch = sameLine.match(/^([A-Za-z][\w-]*)\s+(MODULE-IDENTITY|OBJECT\s+IDENTIFIER|OBJECT-IDENTITY)\b/i);
+      const sameLineMatch = sameLine.match(/^([A-Za-z][\w-]*)\s+(MODULE-IDENTITY|OBJECT\s+IDENTIFIER|OBJECT-IDENTITY|OBJECT-TYPE|NOTIFICATION-TYPE)\b/i);
       if (sameLineMatch) {
         return {
           name: sameLineMatch[1],
@@ -418,7 +503,7 @@
           continue;
         }
 
-        const match = trimmed.match(/^([A-Za-z][\w-]*)\s+(MODULE-IDENTITY|OBJECT\s+IDENTIFIER|OBJECT-IDENTITY)\b/i);
+        const match = trimmed.match(/^([A-Za-z][\w-]*)\s+(MODULE-IDENTITY|OBJECT\s+IDENTIFIER|OBJECT-IDENTITY|OBJECT-TYPE|NOTIFICATION-TYPE)\b/i);
         if (match) {
           return {
             name: match[1],
@@ -430,6 +515,62 @@
       }
 
       return null;
+    }
+
+    function normalizeType(type) {
+      return type.replace(/\s+/g, " ").trim().toUpperCase();
+    }
+
+    function shouldDisplayType(type) {
+      return [
+        "MODULE-IDENTITY",
+        "OBJECT IDENTIFIER",
+        "OBJECT-IDENTITY",
+        "OBJECT-TYPE",
+        "NOTIFICATION-TYPE"
+      ].includes(type);
+    }
+
+    function readDescription(lines, assignmentIndex) {
+      for (let index = assignmentIndex; index >= 0 && index >= assignmentIndex - 80; index -= 1) {
+        if (lines[index].trim() !== "DESCRIPTION") {
+          continue;
+        }
+
+        const block = readQuotedBlock(lines, index + 1);
+        if (block) {
+          return block;
+        }
+      }
+
+      return "";
+    }
+
+    function readQuotedBlock(lines, startIndex) {
+      const parts = [];
+      let started = false;
+
+      for (let index = startIndex; index < lines.length; index += 1) {
+        let line = lines[index].trim();
+        if (!started) {
+          const quoteIndex = line.indexOf("\"");
+          if (quoteIndex === -1) {
+            continue;
+          }
+          started = true;
+          line = line.slice(quoteIndex + 1);
+        }
+
+        const endIndex = line.indexOf("\"");
+        if (endIndex !== -1) {
+          parts.push(line.slice(0, endIndex).trim());
+          break;
+        }
+
+        parts.push(line.trim());
+      }
+
+      return parts.join(" ").replace(/\s+/g, " ").trim();
     }
 
     function readFollowingComments(lines, startIndex) {
@@ -473,8 +614,10 @@
       for (const entry of state.filtered) {
         const row = document.createElement("tr");
         row.appendChild(createCell(entry.name, "name"));
+        row.appendChild(createCell(entry.type, "type"));
         row.appendChild(createCell(entry.definition, "definition"));
         row.appendChild(createCell(entry.oid, "oid"));
+        row.appendChild(createCell(entry.source, "source"));
         fragment.appendChild(row);
       }
 
